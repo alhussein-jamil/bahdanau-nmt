@@ -1,4 +1,13 @@
-from .decoder import *
-from .fcnn import *
-from .rnn import *
-from .translation_models import *
+from .decoder import Alignment, Decoder, OutputNetwork
+from .fcnn import FCNN
+from .rnn import RNN
+from .translation_models import AlignAndTranslate
+
+__all__ = [
+    "AlignAndTranslate",
+    "Alignment",
+    "Decoder",
+    "FCNN",
+    "OutputNetwork",
+    "RNN",
+]

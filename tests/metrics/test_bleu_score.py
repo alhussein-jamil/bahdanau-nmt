@@ -35,6 +35,5 @@ class TestBLEUScore(unittest.TestCase):
             self.assertAlmostEqual(r.item(), scores[i].item(), places=4)
 
 
-# Créer un test runner et exécuter les tests
-runner = unittest.TextTestRunner()
-result = runner.run(unittest.makeSuite(TestBLEUScore))
+if __name__ == "__main__":
+    unittest.main()

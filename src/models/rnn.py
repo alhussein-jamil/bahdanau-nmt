@@ -88,7 +88,6 @@ class RNN(nn.Module):
                 device=self.device,
                 dtype=torch.float16,
             )
-        c0 = None
         if isinstance(self.rnn, nn.LSTM):
             c0 = torch.zeros(
                 self.num_layers * (2 if self.rnn.bidirectional else 1),
@@ -97,10 +96,9 @@ class RNN(nn.Module):
                 device=self.device,
                 dtype=torch.float16,
             )
-            out, (hidden, _) = self.rnn(x, (h0, c0))
-            
-        # Forward propagate RNN
-        out, hidden = self.rnn(x, h0 if c0 is None else (h0, c0))
+            out, hidden = self.rnn(x, (h0, c0))
+        else:
+            out, hidden = self.rnn(x, h0)
         return out.half(), (hidden[0] if isinstance(hidden, tuple) else hidden).half()
 
     def init_weights(self):

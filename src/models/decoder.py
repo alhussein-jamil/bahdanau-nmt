@@ -162,13 +162,11 @@ class Decoder(nn.Module):
         # GRU layer
         self.rnn = RNN(**rnn)
 
-        # Embedding layer
-        self.embedding = FCNN(
-            input_size=embedding["vocab_size"],
-            output_size=embedding["embedding_size"],
-            device=embedding["device"],
-
+        self.vocab_size = embedding["vocab_size"]
+        self.embedding = nn.Embedding(
+            self.vocab_size, embedding["embedding_size"]
         )
+        nn.init.normal_(self.embedding.weight, mean=0, std=0.01)
         # self.batch_norm_enc = nn.BatchNorm1d(2*rnn["hidden_size"])
         self.output_nn = OutputNetwork(**output_nn)
 
@@ -210,18 +208,19 @@ class Decoder(nn.Module):
                 raise ValueError("h_emb must be specified for attention model")
             # Initialize context vector as a learnable parameter
             if s_i is None:
-                s_i = (
-                    F.tanh(self.Ws(h[:,0,self.rnn.hidden_size :]))
-                )
+                # Paper Eq. 5: s_0 = tanh(W_s * forward_h_1) — forward part at first position
+                s_i = F.tanh(self.Ws(h[:, 0, : self.rnn.hidden_size]))
             if y_i is None:
-                y_i = torch.zeros(
-                    h.size(0),
-                    self.relaxation_nn.output_size,
-                    device=h.device,
-                    dtype=torch.float16,
+                sos_token = self.vocab_size - 2
+                token_ids = torch.full(
+                    (h.size(0),), sos_token, device=h.device, dtype=torch.long
                 )
-                y_i[:, -2] = 1
-            embed_y_i = self.embedding(y_i)
+                embed_y_i = self.embedding(token_ids)
+            elif y_i.is_floating_point() and y_i.shape[-1] == self.vocab_size:
+                embed_y_i = y_i.float() @ self.embedding.weight
+            else:
+                token_ids = y_i.long() if y_i.dim() > 0 else y_i.long().unsqueeze(0)
+                embed_y_i = self.embedding(token_ids)
             
             # Compute the embedding of the current context vector
             s_i_emb = self.alignment.nn_s(s_i.view(h.size(0), -1)).half()

@@ -2,11 +2,14 @@ import argparse
 import torch
 import yaml
 
+from data_preprocessing import load_data
 from models.translation_models import AlignAndTranslate
-from src.data_preprocessing import load_data
 
 
 torch.backends.cudnn.benchmark = True
+if torch.cuda.is_available():
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
 # Define command-line arguments
 parser = argparse.ArgumentParser()
@@ -52,9 +55,9 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--load_last_model",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=True,
-        help="Load the last model",
+        help="Load the last saved model checkpoint",
     )
     parser.add_argument(
         "--encoder_decoder",
@@ -159,6 +162,7 @@ if __name__ == "__main__":
         vocab_size=len(english_vocab) + 2,
         rnn_type="LSTM",
         embedding_size=config["embedding_size"],
+        reverse_source=True,
     )
 
     # Define training configuration
@@ -169,7 +173,11 @@ if __name__ == "__main__":
         french_vocab=french_vocab,
         epochs=config["epochs"],
         load_last_model=config["load_last_model"],
-        beam_search=True,
+        beam_search_eval=config.get("beam_search_eval", True),
+        display_every_epochs=config.get("display_every_epochs", 5),
+        grad_accum_steps=config.get("grad_accum_steps", 1),
+        lr=config.get("lr", 0.001),
+        scheduler=config.get("scheduler", {}),
         Tx=config["Tx"],
         Ty=config["Ty"],
     )
@@ -183,7 +191,7 @@ if __name__ == "__main__":
     model = AlignAndTranslate(**translator_cfg).to(device)
     english_phrases = [
         "it should be noted that the marine environment is the least known of environments .",
-        "The agreement on the European Economic Area was signed in August 1992 ."
+        "The agreement on the European Economic Area was signed in August 1992 .",
         "Destruction of the equipment means that Syria can no longer produce new chemical weapons .",
         '" This will change my future with my family , " the man said .',
     ]
@@ -203,7 +211,7 @@ if __name__ == "__main__":
 
     # Train the model
     if args.test:
-        evaluation = model.eval(val_dataloader, max_len=args.Ty)
-        breakpoint()
+        evaluation = model.eval(val_dataloader, max_len=config["Ty"])
+        print(f"Evaluation BLEU scores by length: {evaluation}")
     else:
         model.train(train_loader=train_dataloader, val_loader=val_dataloader)

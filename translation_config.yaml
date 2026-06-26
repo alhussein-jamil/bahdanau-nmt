@@ -7,10 +7,20 @@ embedding_size: 620
 max_out_units: 500
 vocab_size_en: 30000
 vocab_size_fr: 30000
-batch_size: 80
+batch_size: 16
 epochs: 620
 vocab_source: "train"
 load_last_model: true   
 encoder_decoder: false
 multiprocessing: true
 test: false
+lr: 0.001
+scheduler:
+  type: plateau          # plateau | cosine | none
+  warmup_epochs: 3       # linear warmup from 0 -> lr
+  factor: 0.5            # multiply lr by this when val loss plateaus
+  patience: 5             # epochs without val improvement before lr drop
+  min_lr: 1.0e-6
+grad_accum_steps: 4        # effective batch size = batch_size * grad_accum_steps = 64
+beam_search_eval: true     # beam search for eval/translate only, not training samples
+display_every_epochs: 5    # attention plots and sample translations every N epochs

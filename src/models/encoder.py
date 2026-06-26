@@ -1,9 +1,10 @@
-import torch.nn as nn
-
-from models.rnn import RNN
-from global_variables import DEVICE
 import torch
-from models.fcnn import FCNN
+import torch.nn as nn
+from torch.nn import init
+
+from global_variables import DEVICE
+from models.rnn import RNN
+
 
 class Encoder(nn.Module):
     def __init__(self, **kwargs):
@@ -14,9 +15,10 @@ class Encoder(nn.Module):
         rnn_type = kwargs.get("rnn_type", "GRU")
         embedding_size = kwargs.get("embedding_size", 5)
         dropout = kwargs.get("dropout", 0.0)
+        reverse_source = kwargs.get("reverse_source", True)
         super().__init__()
         self.vocab_size = vocab_size
-        # Utiliser la classe RNN dans Encoder
+        self.reverse_source = reverse_source
         self.rnn = RNN(
             input_size=embedding_size,
             hidden_size=rnn_hidden_size,
@@ -26,19 +28,15 @@ class Encoder(nn.Module):
             bidirectional=True,
             type=rnn_type,
         )
-        self.embedding = FCNN(
-            input_size=vocab_size,
-            output_size=embedding_size,
-            device=rnn_device,
-            dropout=dropout,
-        )
+        self.embedding = nn.Embedding(vocab_size, embedding_size)
+        init.normal_(self.embedding.weight, mean=0, std=0.01)
 
     @torch.autocast(DEVICE)
     def forward(self, x):
-        x = torch.nn.functional.one_hot(x.long(), self.vocab_size).half()   
-        # Appliquer l'embedding
-        embedded = self.embedding(x.float())
-        # Appeler la classe RNN pour obtenir output et hidden
+        # Paper Section 4.1: reverse source sentence for better memory in encoder RNN
+        if self.reverse_source:
+            x = torch.flip(x, dims=[1])
+        embedded = self.embedding(x.long())
         with torch.autocast(DEVICE):
             rnn_output, rnn_hidden = self.rnn(embedded)
         return rnn_output, rnn_hidden

@@ -1,7 +1,23 @@
+# Python artifacts
 *egg-info
 *cpython*
 *__pycache__*
+
+# Caches
 *cache*
+.pytest_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+
+# Editor history
+.history/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Generated local training data
 *data/local_data/processed_data
 *data/local_data/trained_models
-.history/
+*data/local_data/dictionaries

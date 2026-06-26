@@ -1,5 +1,5 @@
 import os
-from typing import Any, Dict, List, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 from matplotlib import pyplot as plt
@@ -75,7 +75,7 @@ def plot_alignment(
     plt.close()
 
 
-def BELU_score_plot(data: Dict[str, np.ndarray], save_path: str = None):
+def BLEU_score_plot(data: Dict[str, np.ndarray], save_path: str = None):
     """
     Plot BLEU score for each epoch.
 

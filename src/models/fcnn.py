@@ -47,12 +47,8 @@ class FCNN(nn.Module):
             self.fc.append(nn.Linear(self.hidden_sizes[i - 1], self.hidden_sizes[i]))
 
         if len(self.hidden_sizes) > 0:
-            # Add the final fully-connected layer
             self.fc.append(nn.Linear(self.hidden_sizes[-1], self.output_size))
 
-        self.fc = self.fc
-
-        # Add the activation function
         self.activation = activation
 
         # Add the dropout layer
