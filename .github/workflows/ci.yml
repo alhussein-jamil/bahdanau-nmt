@@ -9,6 +9,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      TORCH_USE_ONEDNN: "0"
     steps:
       - uses: actions/checkout@v4
 
