@@ -11,7 +11,7 @@ from torch.nn import functional as F
 from tqdm import tqdm
 
 from data_preprocessing import TokenizerWrapper, pad_sequences, toIdTransform
-from global_variables import DATA_DIR, DEVICE
+from global_variables import DATA_DIR, DEVICE, maybe_autocast
 from metrics import bleu_seq
 from metrics.losses import Loss
 from models.decoder import Decoder
@@ -133,37 +133,37 @@ class AlignAndTranslate(nn.Module):
         os.makedirs(self.best_models_dir, exist_ok=True)
         os.makedirs(self.plot_dir, exist_ok=True)
 
-    @torch.autocast(DEVICE)
     def forward(
         self,
         x: torch.Tensor,
         y: torch.Tensor = None,
         return_alignments: bool = True,
     ) -> torch.Tensor:
-        encoder_output, _ = self.encoder(x)
+        with maybe_autocast():
+            encoder_output, _ = self.encoder(x)
 
-        h_emb = self.decoder.alignment.nn_h(encoder_output)
-        s_i = None
-        y_i = None
-        allignments = [] if return_alignments else None
-        decoder_output = torch.zeros(
-            (x.shape[0], self.Ty, self.decoder.relaxation_nn.output_size),
-            device=self.device,
-        )
-        for t in range(self.Ty):
-            if y is not None:
-                # Teacher forcing: feed ground-truth previous token y_t (y_0 = <sos>)
-                y_prev = y[:, t]
-            elif y_i is not None:
-                # Inference: use hard token from previous step (not softmax distribution)
-                y_prev = torch.argmax(y_i, dim=-1)
-            else:
-                y_prev = None
+            h_emb = self.decoder.alignment.nn_h(encoder_output)
+            s_i = None
+            y_i = None
+            allignments = [] if return_alignments else None
+            decoder_output = torch.zeros(
+                (x.shape[0], self.Ty, self.decoder.relaxation_nn.output_size),
+                device=self.device,
+            )
+            for t in range(self.Ty):
+                if y is not None:
+                    # Teacher forcing: feed ground-truth previous token y_t (y_0 = <sos>)
+                    y_prev = y[:, t]
+                elif y_i is not None:
+                    # Inference: use hard token from previous step (not softmax distribution)
+                    y_prev = torch.argmax(y_i, dim=-1)
+                else:
+                    y_prev = None
 
-            y_i, s_i, a_i = self.decoder(t, encoder_output, h_emb, s_i, y_prev)
-            if return_alignments:
-                allignments.append(a_i)
-            decoder_output[:, t, :] = y_i
+                y_i, s_i, a_i = self.decoder(t, encoder_output, h_emb, s_i, y_prev)
+                if return_alignments:
+                    allignments.append(a_i)
+                decoder_output[:, t, :] = y_i
 
         if return_alignments:
             allignments = torch.stack(allignments, dim=1)

@@ -3,7 +3,8 @@ from typing import List
 import torch
 from torch import nn
 from torch.nn import init
-from global_variables import DEVICE
+
+from global_variables import maybe_autocast
 
 
 class FCNN(nn.Module):
@@ -57,7 +58,6 @@ class FCNN(nn.Module):
         # Initialize the weights
         self.init_weights(mean, std)
 
-    @torch.autocast(DEVICE)
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass of the FCNN.
@@ -68,22 +68,18 @@ class FCNN(nn.Module):
         Returns:
             torch.Tensor: Output tensor.
         """
-        # Iterate through the fully-connected layers
-        for i in range(len(self.fc) - 1):
-            # Apply the linear transformation
-            x = self.fc[i](x).half()
+        with maybe_autocast():
+            for i in range(len(self.fc) - 1):
+                x = self.fc[i](x)
+                x = self.activation(x)
+                x = self.dropout(x)
 
-            # Apply the activation function
-            x = self.activation(x).half()
+            x = self.fc[-1](x)
+            x = self.last_layer_activation(x)
 
-            # Apply the dropout layer
-            x = self.dropout(x).half()
-
-        # Apply the final fully-connected layer
-        x = self.fc[-1](x).half()
-        x = self.last_layer_activation(x).half()
-
-        return x.half()
+        if self.device == "cuda":
+            return x.half()
+        return x
 
     def init_weights(self, mean: float = 0, std: float = 0.01):
         for name, param in self.named_parameters():

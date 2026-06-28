@@ -11,6 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TORCH_USE_ONEDNN: "0"
+      DNNL_MAX_CPU_ISA: "AVX2"
     steps:
       - uses: actions/checkout@v4
 

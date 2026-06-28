@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 from models.fcnn import FCNN
 from models.rnn import RNN
-from global_variables import DEVICE
+from global_variables import maybe_autocast
 
 
 class Alignment(nn.Module):
@@ -44,7 +44,6 @@ class Alignment(nn.Module):
             std=0.0,
         )
 
-    @torch.autocast(DEVICE)
     def forward(self, s_emb: torch.Tensor, h_emb: torch.Tensor) -> torch.Tensor:
         """
         Forward pass of the Alignment module.
@@ -56,9 +55,8 @@ class Alignment(nn.Module):
         Returns:
             torch.Tensor: Alignment vector.
         """
-        return (
-            self.va(F.tanh(s_emb + h_emb))
-        )
+        with maybe_autocast():
+            return self.va(F.tanh(s_emb + h_emb))
 
 
 class OutputNetwork(nn.Module):
@@ -112,7 +110,6 @@ class OutputNetwork(nn.Module):
         )
         self.output_size = vocab_size
 
-    @torch.autocast(DEVICE)
     def forward(
         self, s_i: torch.Tensor, y_i: torch.Tensor, c_i: torch.Tensor
     ) -> torch.Tensor:
@@ -127,14 +124,15 @@ class OutputNetwork(nn.Module):
         Returns:
             torch.Tensor: The output tensor.
         """
-        # based on the article Maxout Networks
-        t_tilde = (self.u_o(s_i) + self.v_o(y_i) + self.c_o(c_i))
+        with maybe_autocast():
+            # based on the article Maxout Networks
+            t_tilde = (self.u_o(s_i) + self.v_o(y_i) + self.c_o(c_i))
 
-        # sep odd and even
-        t_even = t_tilde[:, 0::2]
-        t_odd = t_tilde[:, 1::2]
+            # sep odd and even
+            t_even = t_tilde[:, 0::2]
+            t_odd = t_tilde[:, 1::2]
 
-        return self.output_nn(torch.max(t_even, t_odd))
+            return self.output_nn(torch.max(t_even, t_odd))
 
 
 class Decoder(nn.Module):
@@ -184,7 +182,6 @@ class Decoder(nn.Module):
         )
 
 
-    @torch.autocast(DEVICE)
     def forward(self, t: int , h, h_emb = None,s_i = None, y_i = None):
         """
         Forward pass of the Decoder module.
@@ -202,58 +199,58 @@ class Decoder(nn.Module):
             torch.Tensor: Alignment vector.
             
         """
-        
-        if not self.traditional:
-            if h_emb is None:
-                raise ValueError("h_emb must be specified for attention model")
-            # Initialize context vector as a learnable parameter
-            if s_i is None:
-                # Paper Eq. 5: s_0 = tanh(W_s * forward_h_1) — forward part at first position
-                s_i = F.tanh(self.Ws(h[:, 0, : self.rnn.hidden_size]))
-            if y_i is None:
-                sos_token = self.vocab_size - 2
-                token_ids = torch.full(
-                    (h.size(0),), sos_token, device=h.device, dtype=torch.long
+        with maybe_autocast():
+            if not self.traditional:
+                if h_emb is None:
+                    raise ValueError("h_emb must be specified for attention model")
+                # Initialize context vector as a learnable parameter
+                if s_i is None:
+                    # Paper Eq. 5: s_0 = tanh(W_s * forward_h_1) — forward part at first position
+                    s_i = F.tanh(self.Ws(h[:, 0, : self.rnn.hidden_size]))
+                if y_i is None:
+                    sos_token = self.vocab_size - 2
+                    token_ids = torch.full(
+                        (h.size(0),), sos_token, device=h.device, dtype=torch.long
+                    )
+                    embed_y_i = self.embedding(token_ids)
+                elif y_i.is_floating_point() and y_i.shape[-1] == self.vocab_size:
+                    embed_y_i = y_i.float() @ self.embedding.weight
+                else:
+                    token_ids = y_i.long() if y_i.dim() > 0 else y_i.long().unsqueeze(0)
+                    embed_y_i = self.embedding(token_ids)
+                
+                # Compute the embedding of the current context vector
+                s_i_emb = self.alignment.nn_s(s_i.view(h.size(0), -1))
+                if self.rnn.device == "cuda":
+                    s_i_emb = s_i_emb.half()
+                
+                # Compute alignment vector
+                a = self.alignment(s_i_emb.unsqueeze(1).repeat(1, h.size(1), 1),
+                                    h_emb).squeeze(2)
+                
+
+                # Apply softmax to obtain attention weights
+                e = F.softmax(a.float(), dim=1)
+
+                # Compute context vector
+                c = torch.bmm(h.transpose(1, 2), e.unsqueeze(2)).squeeze(2)
+                
+                # Compute output and update context vector
+                _, s_i = self.rnn(
+                    torch.cat((embed_y_i.unsqueeze(1).float(),
+                                c.unsqueeze(1).float()), dim=2),
+                                  s_i.unsqueeze(0)
                 )
-                embed_y_i = self.embedding(token_ids)
-            elif y_i.is_floating_point() and y_i.shape[-1] == self.vocab_size:
-                embed_y_i = y_i.float() @ self.embedding.weight
-            else:
-                token_ids = y_i.long() if y_i.dim() > 0 else y_i.long().unsqueeze(0)
-                embed_y_i = self.embedding(token_ids)
-            
-            # Compute the embedding of the current context vector
-            s_i_emb = self.alignment.nn_s(s_i.view(h.size(0), -1)).half()
-            
-            # Compute alignment vector
-            a = self.alignment(s_i_emb.unsqueeze(1).repeat(1, h.size(1), 1),
-                                h_emb).squeeze(2)
-            
+                s_i = s_i.squeeze()
 
-            # Apply softmax to obtain attention weights
-            e = F.softmax(a.float(), dim=1)
+                # Embed the output token and compute the output of the output network
+                y_i = self.output_nn(
+                    s_i.view(h.size(0), -1), embed_y_i.squeeze(1), c
+                )
 
-            # Compute context vector
-            c = torch.bmm(h.transpose(1, 2), e.unsqueeze(2)).squeeze(2)
-            
-            # Compute output and update context vector
-            _, s_i = self.rnn(
-                torch.cat((embed_y_i.unsqueeze(1).float(),
-                            c.unsqueeze(1).float()), dim=2),
-                              s_i.unsqueeze(0)
-            )
-            s_i = s_i.squeeze()
-
-            # Embed the output token and compute the output of the output network
-            y_i = self.output_nn(
-                s_i.view(h.size(0), -1), embed_y_i.squeeze(1), c
-            )
-
-           
-            # Store the output in the output tensor
-            return y_i, s_i, e
-        else:
-            with torch.autocast(DEVICE):
-                y_i_emb, s_i = self.rnn(h[:, t,:].view(h.shape[0], 1, -1),s_i)
+               
+                # Store the output in the output tensor
+                return y_i, s_i, e
+            y_i_emb, s_i = self.rnn(h[:, t,:].view(h.shape[0], 1, -1),s_i)
             y_i = self.relaxation_nn(y_i_emb)
             return y_i, s_i, None

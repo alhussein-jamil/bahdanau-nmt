@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from torch.nn import init
 
-from global_variables import DEVICE
+from global_variables import maybe_autocast
 from models.rnn import RNN
 
 
@@ -31,12 +31,11 @@ class Encoder(nn.Module):
         self.embedding = nn.Embedding(vocab_size, embedding_size)
         init.normal_(self.embedding.weight, mean=0, std=0.01)
 
-    @torch.autocast(DEVICE)
     def forward(self, x):
-        # Paper Section 4.1: reverse source sentence for better memory in encoder RNN
-        if self.reverse_source:
-            x = torch.flip(x, dims=[1])
-        embedded = self.embedding(x.long())
-        with torch.autocast(DEVICE):
+        with maybe_autocast():
+            # Paper Section 4.1: reverse source sentence for better memory in encoder RNN
+            if self.reverse_source:
+                x = torch.flip(x, dims=[1])
+            embedded = self.embedding(x.long())
             rnn_output, rnn_hidden = self.rnn(embedded)
         return rnn_output, rnn_hidden
