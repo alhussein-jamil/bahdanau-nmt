@@ -1,6 +1,13 @@
 # Bahdanau Neural Machine Translation
 
 <p align="center">
+  <a href="https://github.com/alhussein-jamil/bahdanau-nmt/actions/workflows/ci.yml"><img src="https://github.com/alhussein-jamil/bahdanau-nmt/actions/workflows/ci.yml/badge.svg?branch=main" alt="ci"/></a>
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python 3.10+"/></a>
+  <a href="https://pytorch.org/"><img src="https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg" alt="PyTorch 2.0+"/></a>
+  <a href="https://arxiv.org/abs/1409.0473"><img src="https://img.shields.io/badge/paper-arXiv%201409.0473-b31b1b.svg" alt="arXiv 1409.0473"/></a>
+</p>
+
+<p align="center">
   <img src="docs/assets/diffusion-attention-hero.png" alt="Generated diffusion-style attention visualization for Bahdanau NMT">
 </p>
 
