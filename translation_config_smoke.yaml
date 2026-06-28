@@ -1,0 +1,23 @@
+train_len: 64
+val_len: 32
+Tx: 10
+Ty: 10
+hidden_size: 32
+embedding_size: 32
+max_out_units: 16
+vocab_size_en: 200
+vocab_size_fr: 200
+batch_size: 16
+epochs: 1
+vocab_source: "train"
+load_last_model: false
+encoder_decoder: false
+multiprocessing: false
+test: false
+lr: 0.001
+scheduler:
+  type: none
+  warmup_epochs: 0
+grad_accum_steps: 1
+beam_search_eval: false
+display_every_epochs: 1

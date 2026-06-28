@@ -1,7 +1,8 @@
 import torch
 from torch import nn
 from torch.nn import init
-from global_variables import DEVICE
+
+from global_variables import maybe_autocast
 
 
 class RNN(nn.Module):
@@ -68,7 +69,6 @@ class RNN(nn.Module):
         # Initialize weights
         self.init_weights()
 
-    @torch.autocast(DEVICE)
     def forward(self, x, h0=None):
         """
         Forward pass of the RNN.
@@ -79,29 +79,33 @@ class RNN(nn.Module):
         Returns:
             torch.Tensor: Output tensor.
         """
-        # Initialize hidden state
-        if h0 is None:
-            h0 = torch.zeros(
-                self.num_layers * (2 if self.rnn.bidirectional else 1),
-                x.size(0),
-                self.hidden_size,
-                device=self.device,
-                dtype=torch.float16,
-            )
-        c0 = None
-        if isinstance(self.rnn, nn.LSTM):
-            c0 = torch.zeros(
-                self.num_layers * (2 if self.rnn.bidirectional else 1),
-                x.size(0),
-                self.hidden_size,
-                device=self.device,
-                dtype=torch.float16,
-            )
-            out, (hidden, _) = self.rnn(x, (h0, c0))
-            
-        # Forward propagate RNN
-        out, hidden = self.rnn(x, h0 if c0 is None else (h0, c0))
-        return out.half(), (hidden[0] if isinstance(hidden, tuple) else hidden).half()
+        with maybe_autocast():
+            if h0 is not None:
+                h0 = h0.to(device=x.device, dtype=x.dtype)
+            if h0 is None:
+                h0 = torch.zeros(
+                    self.num_layers * (2 if self.rnn.bidirectional else 1),
+                    x.size(0),
+                    self.hidden_size,
+                    device=x.device,
+                    dtype=x.dtype,
+                )
+            if isinstance(self.rnn, nn.LSTM):
+                c0 = torch.zeros(
+                    self.num_layers * (2 if self.rnn.bidirectional else 1),
+                    x.size(0),
+                    self.hidden_size,
+                    device=x.device,
+                    dtype=x.dtype,
+                )
+                out, hidden = self.rnn(x, (h0, c0))
+            else:
+                out, hidden = self.rnn(x, h0)
+
+        hidden_out = hidden[0] if isinstance(hidden, tuple) else hidden
+        if self.device == "cuda":
+            return out.half(), hidden_out.half()
+        return out, hidden_out
 
     def init_weights(self):
         for name, param in self.named_parameters():

@@ -27,12 +27,11 @@ class Loss(nn.Module):
 
         elif isinstance(self.loss_fn, nn.NLLLoss):
             _, _, vocab_size = x.shape
-            # Reshape x for NLLLoss
-            x = x.view(-1, vocab_size)
-            # Apply log softmax to x since NLLLoss expects log probabilities
-            x = F.log_softmax(x, dim=1)
-            y = y.view(-1).long()
-            return self.loss_fn(x, y)
+            return F.cross_entropy(
+                x.reshape(-1, vocab_size),
+                y.reshape(-1).long(),
+                ignore_index=self.loss_fn.ignore_index,
+            )
 
         else:
             raise ValueError("Unsupported loss function type")

@@ -1,6 +1,10 @@
 import os
-from multiprocessing import Manager, Process, cpu_count
-from typing import Any
+import shutil
+import string
+from collections import Counter
+from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import cpu_count
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -8,12 +12,33 @@ import torch
 from datasets import concatenate_datasets, load_dataset, load_from_disk
 from sacremoses import MosesTokenizer
 from torch.utils.data import Dataset
+from tqdm import tqdm
 from transformers import AutoTokenizer
 
 from global_variables import DATA_DIR, EXT_DATA_DIR
-from tqdm import tqdm
 
 n_processors = cpu_count()
+
+
+def _dataset_cache_ready(path) -> bool:
+    """Return True if path contains a complete datasets save_to_disk cache."""
+    cache_path = Path(path)
+    return cache_path.is_dir() and (cache_path / "state.json").is_file()
+
+
+def _needs_dataset_build(path) -> bool:
+    """Return True if the dataset at path must be (re)built."""
+    if _dataset_cache_ready(path):
+        return False
+    cache_path = Path(path)
+    if cache_path.exists():
+        shutil.rmtree(cache_path)
+    return True
+
+
+def _get_translation_sentences(dataset, language: str) -> list:
+    """Extract source or target sentences from a WMT-style translation column."""
+    return [translation[language] for translation in dataset["translation"]]
 
 
 class TokenizerWrapper:
@@ -140,48 +165,10 @@ class to_tensor:
         }
 
 
-from collections import Counter
-
-
-def extract_word_frequency_dicho(data):
-    if len(data) == 1:
-        dictionary = {
-            "en": Counter(data[0]["count_en_words"]),
-            "fr": Counter(data[0]["count_fr_words"]),
-        }
-        df_en = pd.DataFrame(dictionary["en"].items(), columns=["word", "freq"])
-        df_fr = pd.DataFrame(dictionary["fr"].items(), columns=["word", "freq"])
-        return df_en, df_fr
-    if len(data) == 0:
-        df_en = pd.DataFrame(columns=["word", "freq"])
-        df_fr = pd.DataFrame(columns=["word", "freq"])
-        return df_en, df_fr
-    middle = len(data) // 2
-
-    left_df_en, left_df_fr = extract_word_frequency_dicho(data.select(range(middle)))
-    right_df_en, right_df_fr = extract_word_frequency_dicho(
-        data.select(range(middle, len(data)))
-    )
-
-    # combine the two dataframes and sum the frequencies
-    df_en = pd.concat([left_df_en, right_df_en])
-    df_en = df_en.groupby("word").sum().reset_index()
-    df_fr = pd.concat([left_df_fr, right_df_fr])
-    df_fr = df_fr.groupby("word").sum().reset_index()
-
-    df_en.sort_values(by=["freq"], ascending=False, inplace=True)
-    df_fr.sort_values(by=["freq"], ascending=False, inplace=True)
-
-    return df_en, df_fr
-
-
-import string
-
-
 def extract_word_frequency(data):
     word_freq = {"en": Counter(), "fr": Counter()}
 
-    for i, x in tqdm(enumerate(data)):
+    for x in tqdm(data, desc="Extracting word frequency", unit="sample"):
         for lang in ["en", "fr"]:
             word_freq_dict = dict(
                 zip(
@@ -196,8 +183,6 @@ def extract_word_frequency(data):
                 if word not in string.punctuation
             }
             word_freq[lang].update(word_freq_dict)
-        if (i / len(data)) % 0.1 == 0:
-            print("Processed {} / {} samples".format(i + 1, len(data)), end="\r")
     df_en = pd.DataFrame(word_freq["en"].items(), columns=["word", "freq"])
     df_fr = pd.DataFrame(word_freq["fr"].items(), columns=["word", "freq"])
 
@@ -218,39 +203,68 @@ def pad_to_length(x, length, k):
         return [sos_value] + x[: length - 1]
 
 
-# Function to process train data in parallel
-def process_data(tokenized, Tx, kx, Ty, ky, idx_tensor_en, idx_tensor_fr):
-    for i, x in enumerate(tokenized):
-        idx_tensor_en[i] = torch.tensor(pad_to_length(x["ids_en"], Tx, kx))
-        idx_tensor_fr[i] = torch.tensor(pad_to_length(x["ids_fr"], Ty, ky))
+# Function to pad a slice of tokenized data (used by multiprocessing workers)
+def _slice_data(data, start, end):
+    if hasattr(data, "select"):
+        return data.select(range(start, end))
+    return data[start:end]
 
 
-def pad_multiprocess(data, idx_en, idx_fr, Tx, Ty, kx, ky, multiprocess=True):
-    if multiprocess == True:
-        jobs = []
+def _pad_slice(args):
+    records, Tx, kx, Ty, ky = args
+    n = len(records)
+    idx_en = torch.zeros((n, Tx), dtype=torch.int16)
+    idx_fr = torch.zeros((n, Ty), dtype=torch.int16)
+    for i, x in enumerate(records):
+        ids_en = x["ids_en"]
+        ids_fr = x["ids_fr"]
+        idx_en[i] = torch.tensor(pad_to_length(ids_en, Tx, kx), dtype=torch.int16)
+        idx_fr[i] = torch.tensor(pad_to_length(ids_fr, Ty, ky), dtype=torch.int16)
+    return idx_en, idx_fr
+
+
+def pad_sequences(data, Tx, Ty, kx, ky, multiprocess=True):
+    """Pad tokenized sequences to fixed length, optionally using multiple processes."""
+    n = len(data)
+    idx_en = torch.zeros((n, Tx), dtype=torch.int16)
+    idx_fr = torch.zeros((n, Ty), dtype=torch.int16)
+
+    if multiprocess and n_processors > 1 and n > n_processors:
+        slices = []
         for i in range(n_processors):
-            start, end = (
-                i * len(data) // n_processors,
-                (i + 1) * len(data) // n_processors,
+            start = i * n // n_processors
+            end = (i + 1) * n // n_processors
+            slices.append((_slice_data(data, start, end), Tx, kx, Ty, ky))
+        with ProcessPoolExecutor(max_workers=n_processors) as executor:
+            results = list(
+                tqdm(
+                    executor.map(_pad_slice, slices),
+                    total=len(slices),
+                    desc="Padding sequences",
+                    unit="chunk",
+                )
             )
-            p = Process(
-                target=process_data,
-                args=(
-                    data.select(list(range(start, end))),
-                    Tx,
-                    kx,
-                    Ty,
-                    ky,
-                    idx_en[start:end],
-                    idx_fr[start:end],
-                ),
-            )
-            jobs.append(p)
-            p.start()
-        for proc in jobs:
-            proc.join()
+        offset = 0
+        for en, fr in results:
+            length = en.shape[0]
+            idx_en[offset : offset + length] = en
+            idx_fr[offset : offset + length] = fr
+            offset += length
     else:
-        process_data(data, Tx, kx, Ty, ky, idx_en, idx_fr)
+        for i, x in tqdm(
+            enumerate(data),
+            total=n,
+            desc="Padding sequences",
+            unit="sample",
+        ):
+            idx_en[i] = torch.tensor(pad_to_length(x["ids_en"], Tx, kx), dtype=torch.int16)
+            idx_fr[i] = torch.tensor(pad_to_length(x["ids_fr"], Ty, ky), dtype=torch.int16)
+
+    return idx_en, idx_fr
+
+
+# Backward-compatible alias
+pad_multiprocess = pad_sequences
 
 
 # import autotokenizer
@@ -271,7 +285,7 @@ def load_data(
     Load and preprocess data for training and validation.
     """
 
-    print("Loading and preprocessing data...")
+    tqdm.write("Loading and preprocessing data...")
     mt_en = (
         MosesTokenizer(lang="en")
         if tokenizer == "Moses"
@@ -284,8 +298,8 @@ def load_data(
     )
 
     if not only_vocab:
-        # Load WMT14 dataset
-        wmt14 = load_dataset("wmt14", "fr-en", data_dir="data/")
+        # Load WMT14 dataset (HF Hub id changed from "wmt14" to "wmt/wmt14")
+        wmt14 = load_dataset("wmt/wmt14", "fr-en")
 
         # Accessing example data
         train_data = wmt14["train"]
@@ -308,46 +322,35 @@ def load_data(
         tokenizer_wrapper = TokenizerWrapper(mt_en, mt_fr)
 
         # Tokenize and save train data if not already done
-        if not os.path.exists(
-            DATA_DIR / "processed_data/tokenized_train_data_{}".format(train_len)
-        ):
-            print("Tokenizing train data...")
+        tokenized_train_path = DATA_DIR / f"processed_data/tokenized_train_data_{train_len}"
+        if _needs_dataset_build(tokenized_train_path):
+            tqdm.write("Tokenizing train data...")
             tokenized_train_data = train_data.map(
                 tokenizer_wrapper.tokenize_function,
                 batched=False,
                 num_proc=n_processors,
                 remove_columns=["translation"],
             )
-            tokenized_train_data.save_to_disk(
-                DATA_DIR / "processed_data/tokenized_train_data_{}".format(train_len)
-            )
+            tokenized_train_data.save_to_disk(tokenized_train_path)
 
         # Tokenize and save validation data if not already done
-        if not os.path.exists(
-            DATA_DIR / "processed_data/tokenized_val_data_{}".format(val_len)
-        ):
-            print("Tokenizing validation data...")
+        tokenized_val_path = DATA_DIR / f"processed_data/tokenized_val_data_{val_len}"
+        if _needs_dataset_build(tokenized_val_path):
+            tqdm.write("Tokenizing validation data...")
             tokenized_val_data = val_data.map(
                 tokenizer_wrapper.tokenize_function,
                 batched=False,
                 num_proc=n_processors,
                 remove_columns=["translation"],
             )
-            tokenized_val_data.save_to_disk(
-                DATA_DIR / "processed_data/tokenized_val_data_{}".format(val_len)
-            )
+            tokenized_val_data.save_to_disk(tokenized_val_path)
 
-        tokenized_train_data = load_from_disk(
-            DATA_DIR / "processed_data/tokenized_train_data_{}".format(train_len)
-        )
-        tokenized_val_data = load_from_disk(
-            DATA_DIR / "processed_data/tokenized_val_data_{}".format(val_len)
-        )
+        tokenized_train_data = load_from_disk(tokenized_train_path)
+        tokenized_val_data = load_from_disk(tokenized_val_path)
 
-        if not os.path.exists(
-            DATA_DIR / "processed_data/word_count_{}".format(train_len)
-        ):
-            print("Counting word frequency...")
+        word_count_path = DATA_DIR / f"processed_data/word_count_{train_len}"
+        if _needs_dataset_build(word_count_path):
+            tqdm.write("Counting word frequency...")
             word_count_train = tokenized_train_data.map(
                 toWordCount(Counter), batched=False, num_proc=n_processors
             )
@@ -355,15 +358,11 @@ def load_data(
                 toWordCount(Counter), batched=False, num_proc=n_processors
             )
             word_count = concatenate_datasets([word_count_train, word_count_val])
-            word_count.save_to_disk(
-                DATA_DIR / "processed_data/word_count_{}".format(train_len)
-            )
-        word_count = load_from_disk(
-            DATA_DIR / "processed_data/word_count_{}".format(train_len)
-        )
+            word_count.save_to_disk(word_count_path)
+        word_count = load_from_disk(word_count_path)
 
-    print("Extracting word frequency...")
-    if os.path.exists(DATA_DIR / "dictionaries/") == False:
+    tqdm.write("Building vocabulary...")
+    if not os.path.exists(DATA_DIR / "dictionaries/"):
         os.mkdir(DATA_DIR / "dictionaries/")
     if vocab_source == "train":
         if not os.path.exists(
@@ -392,7 +391,7 @@ def load_data(
     else:
         bow_english = pd.read_csv(EXT_DATA_DIR / "dictionaries/unigram_freq_en_ext.csv")
         bow_french = pd.read_csv(EXT_DATA_DIR / "dictionaries/unigram_freq_fr_ext.csv")
-    print("Done extraction")
+    tqdm.write("Vocabulary ready.")
     bow_english = bow_english[:kx]
     bow_french = bow_french[:ky]
 
@@ -409,97 +408,38 @@ def load_data(
             torch.tensor,
         )
 
-        # Convert tokenized sentences to word IDs and save train data if not already done
-        if not os.path.exists(
-            DATA_DIR
-            / "processed_data/id_train_data_{}_{}_{}_{}".format(
-                train_len, kx, ky, vocab_source
-            )
-        ):
-            print("Converting train data to word IDs...")
+        id_train_path = DATA_DIR / f"processed_data/id_train_data_{train_len}_{kx}_{ky}_{vocab_source}"
+        if _needs_dataset_build(id_train_path):
+            tqdm.write("Converting train data to word IDs...")
             tokenized_train_data = tokenized_train_data.map(
                 to_id_transform, batched=False, num_proc=n_processors
             )
-            tokenized_train_data.save_to_disk(
-                DATA_DIR
-                / "processed_data/id_train_data_{}_{}_{}_{}".format(
-                    train_len, kx, ky, vocab_source
-                )
-            )
+            tokenized_train_data.save_to_disk(id_train_path)
 
-        # Convert tokenized sentences to word IDs and save validation data if not already done
-        if not os.path.exists(
-            DATA_DIR
-            / "processed_data/id_val_data_{}_{}_{}_{}".format(
-                val_len, kx, ky, vocab_source
-            )
-        ):
-            print("Converting validation data to word IDs...")
+        id_val_path = DATA_DIR / f"processed_data/id_val_data_{val_len}_{kx}_{ky}_{vocab_source}"
+        if _needs_dataset_build(id_val_path):
+            tqdm.write("Converting validation data to word IDs...")
             tokenized_val_data = tokenized_val_data.map(
                 to_id_transform, batched=False, num_proc=n_processors
             )
-            tokenized_val_data.save_to_disk(
-                DATA_DIR
-                / "processed_data/id_val_data_{}_{}_{}_{}".format(
-                    val_len, kx, ky, vocab_source
-                )
-            )
+            tokenized_val_data.save_to_disk(id_val_path)
 
-        tokenized_train_data = load_from_disk(
-            DATA_DIR
-            / "processed_data/id_train_data_{}_{}_{}_{}".format(
-                train_len, kx, ky, vocab_source
-            )
-        )
-        tokenized_val_data = load_from_disk(
-            DATA_DIR
-            / "processed_data/id_val_data_{}_{}_{}_{}".format(
-                val_len, kx, ky, vocab_source
-            )
-        )
+        tokenized_train_data = load_from_disk(id_train_path)
+        tokenized_val_data = load_from_disk(id_val_path)
 
-        # Initialize tensors for train and validation data
-        idx_train_tensor_en = torch.zeros(
-            (len(tokenized_train_data), Tx), dtype=torch.int16
+        # Pad sequences to fixed length
+        idx_train_tensor_en, idx_train_tensor_fr = pad_sequences(
+            tokenized_train_data, Tx, Ty, kx, ky, mp
         )
-        idx_train_tensor_fr = torch.zeros(
-            (len(tokenized_train_data), Ty), dtype=torch.int16
-        )
-        idx_val_tensor_en = torch.zeros(
-            (len(tokenized_val_data), Tx), dtype=torch.int16
-        )
-        idx_val_tensor_fr = torch.zeros(
-            (len(tokenized_val_data), Ty), dtype=torch.int16
-        )
-
-        # split the tensors according to the number of processors
-        pad_multiprocess(
-            tokenized_train_data,
-            idx_train_tensor_en,
-            idx_train_tensor_fr,
-            Tx,
-            Ty,
-            kx,
-            ky,
-            mp,
-        )
-        pad_multiprocess(
-            tokenized_val_data, idx_val_tensor_en, idx_val_tensor_fr, Tx, Ty, kx, ky, mp
+        idx_val_tensor_en, idx_val_tensor_fr = pad_sequences(
+            tokenized_val_data, Tx, Ty, kx, ky, mp
         )
 
         # Extract English and French sentences for train and validation data
-        train_english_sentences = [
-            train_data[i]["translation"]["en"] for i in range(len(train_data))
-        ]
-        train_french_sentences = [
-            train_data[i]["translation"]["fr"] for i in range(len(train_data))
-        ]
-        val_english_sentences = [
-            val_data[i]["translation"]["en"] for i in range(len(val_data))
-        ]
-        val_french_sentences = [
-            val_data[i]["translation"]["fr"] for i in range(len(val_data))
-        ]
+        train_english_sentences = _get_translation_sentences(train_data, "en")
+        train_french_sentences = _get_translation_sentences(train_data, "fr")
+        val_english_sentences = _get_translation_sentences(val_data, "en")
+        val_french_sentences = _get_translation_sentences(val_data, "fr")
     else:
         idx_train_tensor_en = torch.zeros((1, Tx), dtype=torch.int16)
         idx_train_tensor_fr = torch.zeros((1, Ty), dtype=torch.int16)
@@ -527,35 +467,37 @@ def load_data(
     train_dataset = TranslationDataset(data["train"])
     val_dataset = TranslationDataset(data["val"])
 
+    num_workers = min(4, n_processors) if n_processors > 1 else 0
+    loader_kwargs = {
+        "batch_size": batch_size,
+        "pin_memory": torch.cuda.is_available(),
+    }
+    if num_workers > 0:
+        loader_kwargs["num_workers"] = num_workers
+        loader_kwargs["persistent_workers"] = True
+
     train_dataloader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True
+        train_dataset, shuffle=True, **loader_kwargs
     )
     val_dataloader = torch.utils.data.DataLoader(
-        val_dataset, batch_size=batch_size, shuffle=True
+        val_dataset, shuffle=False, **loader_kwargs
     )
 
-    # print some samples
-    print("Some samples from the training dataset from the loaded data")
-    for i, sample in enumerate(train_dataset):
-        if i == 5:
-            break
-        print("English: ", sample["english"]["sentences"])
-        print("French: ", sample["french"]["sentences"])
-        print("English ids: ", sample["english"]["idx"])
-        print("French ids: ", sample["french"]["idx"])
-        print("\n")
+    tqdm.write(f"Loaded {len(train_dataset)} train and {len(val_dataset)} val samples.")
+    for label, dataset in (("train", train_dataset), ("val", val_dataset)):
+        sample = dataset[0]
+        tqdm.write(
+            f"  [{label}] en: {sample['english']['sentences'][:120]}..."
+            if len(sample["english"]["sentences"]) > 120
+            else f"  [{label}] en: {sample['english']['sentences']}"
+        )
+        tqdm.write(
+            f"  [{label}] fr: {sample['french']['sentences'][:120]}..."
+            if len(sample["french"]["sentences"]) > 120
+            else f"  [{label}] fr: {sample['french']['sentences']}"
+        )
 
-    print("Some samples from the validation dataset from the loaded data")
-    for i, sample in enumerate(val_dataset):
-        if i == 5:
-            break
-        print("English: ", sample["english"]["sentences"])
-        print("French: ", sample["french"]["sentences"])
-        print("English ids: ", sample["english"]["idx"])
-        print("French ids: ", sample["french"]["idx"])
-        print("\n")
-
-    print("Data loading and preprocessing complete.")
+    tqdm.write("Data loading and preprocessing complete.")
 
     return (
         (data["train"], train_dataloader),

@@ -1,6 +1,6 @@
 import numpy as np
 
-from utils.plotting import BELU_score_plot, plot_alignment, print_table
+from utils.plotting import BLEU_score_plot, plot_alignment, print_table
 
 if __name__ == "__main__":
     english_ex = ["The", "Cat", "Sat", "On", "The", "Mat"]
@@ -26,7 +26,7 @@ if __name__ == "__main__":
         "Transformer": sin_wave + noises[3],
     }
 
-    BELU_score_plot(scores)
+    BLEU_score_plot(scores)
 
     x = ["Model", "All", "No UNK"]
     y = [

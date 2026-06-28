@@ -29,9 +29,8 @@ class TestLoss(unittest.TestCase):
         self.assertFalse(torch.isnan(result).any())
 
 
-# Créer un test runner et exécuter les tests
-runner = unittest.TextTestRunner()
-result = runner.run(unittest.makeSuite(TestLoss))
+if __name__ == "__main__":
+    unittest.main()
 
 
 class TestNLLLoss(unittest.TestCase):
@@ -56,7 +55,12 @@ class TestNLLLoss(unittest.TestCase):
         self.assertTrue(not (result.requires_grad))
         self.assertFalse(torch.isnan(result).any())
 
+    def test_forward_pass_sliced_input(self):
+        # Sliced tensors (e.g. output[:, :-1, :]) may be non-contiguous
+        result = self.loss_instance(self.x[:, :-1, :], self.y[:, 1:])
+        self.assertIsInstance(result, torch.Tensor)
+        self.assertFalse(torch.isnan(result).any())
 
-# Créer un test runner et exécuter les tests
-runner = unittest.TextTestRunner()
-result = runner.run(unittest.makeSuite(TestNLLLoss))
+
+if __name__ == "__main__":
+    unittest.main()
